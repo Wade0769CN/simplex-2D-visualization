@@ -1,0 +1,6 @@
+{
+  "name": "线性规划单纯形法可视化",
+  "description": "一个二维线性规划单纯形法动态教学工具，包含动画轨迹、动态可行域和单纯形表迭代过程。",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
