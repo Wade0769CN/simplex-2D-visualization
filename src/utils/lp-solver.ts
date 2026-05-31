@@ -9,104 +9,311 @@ export function solveSimplex(problem: LPProblem): SimplexStep[] {
   const steps: SimplexStep[] = [];
   const { objective, c1, c2, constraints } = problem;
 
-  // 1. 标准化
-  // x1, x2 是决策变量。根据约束添加松弛变量、剩余变量或人工变量
-  // 虽然这里主要是二维可视化，但算法要稳健
-  // 为了简单起见，我们主要处理 <= 约束，或者将其转化为标准型
-  
-  let matrix: number[][] = [];
-  let headers: string[] = ['obj', 'x1', 'x2'];
-  let basis: string[] = [];
-  
-  // 目标函数行
-  const objRow = [1, objective === 'max' ? -c1 : c1, objective === 'max' ? -c2 : c2];
-  
-  // 处理约束
-  constraints.forEach((cons, i) => {
-    const row = [0, cons.a1, cons.a2];
-    matrix.push(row);
-    const slackName = `s${i + 1}`;
-    headers.push(slackName);
-    basis.push(slackName);
-  });
-  
-  // 补齐目标函数行的松弛变量列
-  for (let i = 0; i < constraints.length; i++) {
-    objRow.push(0);
-  }
-  objRow.push(0); // RHS
-  
-  // 补齐约束行的松弛变量列和 RHS
-  matrix.forEach((row, i) => {
-    for (let j = 0; j < constraints.length; j++) {
-      row.push(i === j ? 1 : 0);
+  // 1. 标准化 RHS：保证所有 b_i >= 0。如果 b_i < 0，整行乘以 -1，方向反转
+  const normalizedConstraints = constraints.map(c => {
+    let a1 = c.a1;
+    let a2 = c.a2;
+    let operator = c.operator;
+    let b = c.b;
+    if (b < 0) {
+      a1 = -a1;
+      a2 = -a2;
+      b = -b;
+      if (operator === '<=') operator = '>=';
+      else if (operator === '>=') operator = '<=';
     }
-    row.push(constraints[i].b);
+    return { id: c.id, a1, a2, operator, b };
   });
-  
-  let tableau = [objRow, ...matrix];
-  headers.push('RHS');
 
-  const getSolution = (tab: number[][]) => {
-    const x1Col = 1;
-    const x2Col = 2;
-    const rhsCol = tab[0].length - 1;
-    
+  // 2. 确定变量和排列表头
+  // 表头格式：['obj', 'x1', 'x2', Slack/Surplus s_j..., Artificial a_j..., 'RHS']
+  const headers: string[] = ['obj', 'x1', 'x2'];
+  const basis: string[] = [];
+
+  const slackIndices: number[] = [];
+  const artificialIndices: number[] = [];
+
+  normalizedConstraints.forEach((c, idx) => {
+    if (c.operator === '<=') {
+      const name = `s${idx + 1}`;
+      headers.push(name);
+      basis.push(name);
+      slackIndices.push(idx);
+    } else if (c.operator === '>=') {
+      const sName = `s${idx + 1}`;
+      headers.push(sName);
+      slackIndices.push(idx); // surplus 变量
+      
+      const aName = `a${idx + 1}`;
+      headers.push(aName);
+      basis.push(aName);
+      artificialIndices.push(idx);
+    } else if (c.operator === '=') {
+      const aName = `a${idx + 1}`;
+      headers.push(aName);
+      basis.push(aName);
+      artificialIndices.push(idx);
+    }
+  });
+
+  headers.push('RHS');
+  const numCols = headers.length;
+
+  // 辅助函数：根据当前基和系数表计算当前的 x1, x2 和原始主目标函数值
+  const getSolution = (tab: number[][], currentHeaders: string[], currentBasis: string[]) => {
     let x1 = 0;
     let x2 = 0;
     
-    // 检查 x1 是否在基中
-    const x1InBasis = basis.findIndex(b => b === 'x1');
-    if (x1InBasis !== -1) {
-       x1 = tab[x1InBasis + 1][rhsCol] / tab[x1InBasis + 1][x1Col];
-    } else {
-        // 另一种检查：列是否为单位向量
-        let count = 0;
-        let lastOneIdx = -1;
-        for(let r=1; r<tab.length; r++) {
-            if (Math.abs(tab[r][x1Col] - 1) < 1e-9) { count++; lastOneIdx = r; }
-            else if (Math.abs(tab[r][x1Col]) > 1e-9) { count = 100; }
-        }
-        if (count === 1) x1 = tab[lastOneIdx][rhsCol];
+    const x1RowIdx = currentBasis.findIndex(b => b === 'x1');
+    const x1Col = currentHeaders.indexOf('x1');
+    if (x1RowIdx !== -1 && x1Col !== -1) {
+      x1 = tab[x1RowIdx + 1][tab[x1RowIdx + 1].length - 1] / tab[x1RowIdx + 1][x1Col];
     }
-
-    const x2InBasis = basis.findIndex(b => b === 'x2');
-    if (x2InBasis !== -1) {
-       x2 = tab[x2InBasis + 1][rhsCol] / tab[x2InBasis + 1][x2Col];
-    } else {
-        let count = 0;
-        let lastOneIdx = -1;
-        for(let r=1; r<tab.length; r++) {
-            if (Math.abs(tab[r][x2Col] - 1) < 1e-9) { count++; lastOneIdx = r; }
-            else if (Math.abs(tab[r][x2Col]) > 1e-9) { count = 100; }
-        }
-        if (count === 1) x2 = tab[lastOneIdx][rhsCol];
+    
+    const x2RowIdx = currentBasis.findIndex(b => b === 'x2');
+    const x2Col = currentHeaders.indexOf('x2');
+    if (x2RowIdx !== -1 && x2Col !== -1) {
+      x2 = tab[x2RowIdx + 1][tab[x2RowIdx + 1].length - 1] / tab[x2RowIdx + 1][x2Col];
     }
+    
+    if (isNaN(x1) || !isFinite(x1)) x1 = 0;
+    if (isNaN(x2) || !isFinite(x2)) x2 = 0;
 
-    return { x: x1, y: x2, z: tab[0][rhsCol] * (objective === 'max' ? 1 : -1) };
+    const z = c1 * x1 + c2 * x2;
+    return { x: x1, y: x2, z };
   };
 
-  const captureStep = (tab: number[][], pRow: number | null, pCol: number | null) => {
-    const sol = getSolution(tab);
+  const captureStep = (tab: number[][], pRow: number | null, pCol: number | null, activeHeaders: string[], activeBasis: string[], message?: string) => {
+    const sol = getSolution(tab, activeHeaders, activeBasis);
     steps.push({
       tableau: tab.map(r => [...r]),
-      basis: [...basis],
-      headers: [...headers],
+      basis: [...activeBasis],
+      headers: [...activeHeaders],
       pivotRow: pRow,
       pivotCol: pCol,
       currentX: sol.x,
       currentY: sol.y,
-      objectiveValue: sol.z
+      objectiveValue: sol.z,
+      message
     });
   };
 
-  // 迭代
-  let iter = 0;
-  while (iter < 10) {
-    // 寻找入基列 (最负的检验数)
+  const hasArtificials = artificialIndices.length > 0;
+  let tableau: number[][] = [];
+
+  if (hasArtificials) {
+    // ---------------------- 第一阶段 (Phase 1) ----------------------
+    // 目标是最小化目标人工变量之和 w = sum(a_k)，等价于最大化 -w = -sum(a_k) => obj行代表 G + sum(a_k) = 0
+    const phase1ObjRow = new Array(numCols).fill(0);
+    phase1ObjRow[0] = 1; // obj
+    
+    // 设置人工变量在行0处系数为 1
+    normalizedConstraints.forEach((c, idx) => {
+      if (c.operator === '>=' || c.operator === '=') {
+        const aName = `a${idx + 1}`;
+        const colIdx = headers.indexOf(aName);
+        if (colIdx !== -1) {
+          phase1ObjRow[colIdx] = 1;
+        }
+      }
+    });
+
+    const constraintRows: number[][] = [];
+    normalizedConstraints.forEach((c, idx) => {
+      const row = new Array(numCols).fill(0);
+      row[0] = 0;
+      row[1] = c.a1;
+      row[2] = c.a2;
+      
+      if (c.operator === '<=') {
+        const name = `s${idx + 1}`;
+        const colIdx = headers.indexOf(name);
+        if (colIdx !== -1) row[colIdx] = 1;
+      } else if (c.operator === '>=') {
+        const name = `s${idx + 1}`;
+        const colIdx = headers.indexOf(name);
+        if (colIdx !== -1) row[colIdx] = -1; // surplus
+      }
+      
+      if (c.operator === '>=' || c.operator === '=') {
+        const name = `a${idx + 1}`;
+        const colIdx = headers.indexOf(name);
+        if (colIdx !== -1) row[colIdx] = 1;
+      }
+      
+      row[numCols - 1] = c.b;
+      constraintRows.push(row);
+    });
+
+    tableau = [phase1ObjRow, ...constraintRows];
+
+    // 从 Row 0 中减去含有人工变量的约束行，满足基变量在 Row 0 中系数为 0 的 canonical 形式
+    artificialIndices.forEach((cIdx) => {
+      const rowIdx = cIdx + 1;
+      const targetRow = tableau[rowIdx];
+      tableau[0] = tableau[0].map((v, colIdx) => v - targetRow[colIdx]);
+    });
+
+    captureStep(
+      tableau, 
+      null, 
+      null, 
+      headers, 
+      basis, 
+      "<strong>第一阶段初始化：</strong>零点 (0,0) 不在可行域内。我们引入人工变量并加入单纯形表，将当前目标设定为<strong>最小化人工变量之和 w</strong>，以寻找原问题的一个初始基可行解。"
+    );
+
+    let iter = 0;
+    while (iter < 20) {
+      let pivotCol = -1;
+      let minVal = -1e-9;
+      for (let j = 1; j < numCols - 1; j++) {
+        if (tableau[0][j] < minVal) {
+          minVal = tableau[0][j];
+          pivotCol = j;
+        }
+      }
+
+      if (pivotCol === -1) {
+        break; // 第一阶段达到最优解
+      }
+
+      let pivotRow = -1;
+      let minRatio = Infinity;
+      for (let i = 1; i <= normalizedConstraints.length; i++) {
+        const val = tableau[i][pivotCol];
+        if (val > 1e-9) {
+          const ratio = tableau[i][numCols - 1] / val;
+          if (ratio < minRatio) {
+            minRatio = ratio;
+            pivotRow = i;
+          }
+        }
+      }
+
+      if (pivotRow === -1) {
+        break; // 第一阶段无界（实际不可能发生，作为安全出口）
+      }
+
+      captureStep(
+        tableau, 
+        pivotRow, 
+        pivotCol, 
+        headers, 
+        basis, 
+        `<strong>第一阶段迭代：</strong>选取检验数最负的变量 <strong>${headers[pivotCol]}</strong> 为入基变量，选取比值最小的 <strong>${basis[pivotRow - 1]}</strong> 为出基变量进行旋转。`
+      );
+
+      const pivotVal = tableau[pivotRow][pivotCol];
+      tableau[pivotRow] = tableau[pivotRow].map(v => v / pivotVal);
+      for (let i = 0; i < tableau.length; i++) {
+        if (i !== pivotRow) {
+          const coeff = tableau[i][pivotCol];
+          tableau[i] = tableau[i].map((v, idx) => v - coeff * tableau[pivotRow][idx]);
+        }
+      }
+
+      basis[pivotRow - 1] = headers[pivotCol];
+      iter++;
+    }
+
+    const phase1OptVal = tableau[0][numCols - 1];
+    // w = -phase1OptVal。若 w > 1e-6 则是无解
+    if (phase1OptVal < -1e-6) {
+      captureStep(
+        tableau,
+        null,
+        null,
+        headers,
+        basis,
+        "<strong>第一阶段结束：</strong>人工变量之和 w 无法降低至 0（w = " + (-phase1OptVal).toFixed(2) + "）。这意味着<strong>原规划问题不存在任何基可行解（可行域为空）</strong>。"
+      );
+      return steps;
+    }
+
+    // 剔除所有人工变量列，过渡至第二阶段
+    const phase2ColIndices = headers.map((h, j) => h.startsWith('a') ? -1 : j).filter(j => j !== -1);
+    const phase2Headers = phase2ColIndices.map(j => headers[j]);
+
+    const phase2Tableau: number[][] = [];
+    const p2ObjRow = new Array(phase2Headers.length).fill(0);
+    p2ObjRow[0] = 1; // obj
+    const x1ColP2 = phase2Headers.indexOf('x1');
+    const x2ColP2 = phase2Headers.indexOf('x2');
+    if (x1ColP2 !== -1) p2ObjRow[x1ColP2] = (objective === 'max' ? -c1 : c1);
+    if (x2ColP2 !== -1) p2ObjRow[x2ColP2] = (objective === 'max' ? -c2 : c2);
+    phase2Tableau.push(p2ObjRow);
+
+    for (let i = 1; i < tableau.length; i++) {
+      const p2Row = phase2ColIndices.map(j => tableau[i][j]);
+      phase2Tableau.push(p2Row);
+    }
+
+    // 第二阶段：消去当前已经处于基中的决策变量在 Row 0 中的原始系数
+    for (let r = 1; r < phase2Tableau.length; r++) {
+      const basicVarName = basis[r - 1];
+      const basicCol = phase2Headers.indexOf(basicVarName);
+      if (basicCol !== -1) {
+        const coeff = phase2Tableau[0][basicCol];
+        if (Math.abs(coeff) > 1e-9) {
+          phase2Tableau[0] = phase2Tableau[0].map((v, colIdx) => v - coeff * phase2Tableau[r][colIdx]);
+        }
+      }
+    }
+
+    tableau = phase2Tableau;
+    headers.length = 0;
+    headers.push(...phase2Headers);
+
+    captureStep(
+      tableau, 
+      null, 
+      null, 
+      headers, 
+      basis, 
+      "<strong>第二阶段开始：</strong>已成功驱逐人工变量，寻找到一个极点初始基可行解！现在<strong>移除所有人工变量，恢复原规划的目标函数形式</strong>。开始对其寻找最优解。"
+    );
+
+  } else {
+    // ---------------------- 传统直接求解 (No Artificials) ----------------------
+    const phase2ObjRow = new Array(numCols).fill(0);
+    phase2ObjRow[0] = 1; // obj
+    phase2ObjRow[1] = (objective === 'max' ? -c1 : c1);
+    phase2ObjRow[2] = (objective === 'max' ? -c2 : c2);
+    
+    const constraintRows: number[][] = [];
+    normalizedConstraints.forEach((c, idx) => {
+      const row = new Array(numCols).fill(0);
+      row[0] = 0;
+      row[1] = c.a1;
+      row[2] = c.a2;
+      
+      const sName = `s${idx + 1}`;
+      const colIdx = headers.indexOf(sName);
+      if (colIdx !== -1) row[colIdx] = 1;
+      row[numCols - 1] = c.b;
+      constraintRows.push(row);
+    });
+
+    tableau = [phase2ObjRow, ...constraintRows];
+
+    captureStep(
+      tableau,
+      null,
+      null,
+      headers,
+      basis,
+      "<strong>初始单纯形表：</strong>由于原点 (0,0) 在可行域内，直接使用决策变量为 0，松弛变量作为基变量构建初始基可行解。"
+    );
+  }
+
+  // ---------------------- 第二阶段迭代 (Phase 2 Loop) ----------------------
+  const p2Cols = headers.length;
+  let iter2 = 0;
+  while (iter2 < 20) {
     let pivotCol = -1;
-    let minVal = 0;
-    for (let j = 1; j < tableau[0].length - 1; j++) {
+    let minVal = -1e-9;
+    for (let j = 1; j < p2Cols - 1; j++) {
       if (tableau[0][j] < minVal) {
         minVal = tableau[0][j];
         pivotCol = j;
@@ -114,17 +321,15 @@ export function solveSimplex(problem: LPProblem): SimplexStep[] {
     }
 
     if (pivotCol === -1) {
-      captureStep(tableau, null, null);
-      break; 
+      break; // 找到最优解
     }
 
-    // 寻找出基行 (最小比值)
     let pivotRow = -1;
     let minRatio = Infinity;
-    const rhsCol = tableau[0].length - 1;
     for (let i = 1; i < tableau.length; i++) {
-      if (tableau[i][pivotCol] > 0) {
-        const ratio = tableau[i][rhsCol] / tableau[i][pivotCol];
+      const val = tableau[i][pivotCol];
+      if (val > 1e-9) {
+        const ratio = tableau[i][p2Cols - 1] / val;
         if (ratio < minRatio) {
           minRatio = ratio;
           pivotRow = i;
@@ -133,27 +338,49 @@ export function solveSimplex(problem: LPProblem): SimplexStep[] {
     }
 
     if (pivotRow === -1) {
-       captureStep(tableau, null, pivotCol);
-       break; // 无界
+      captureStep(
+        tableau,
+        null,
+        pivotCol,
+        headers,
+        basis,
+        `<strong>迭代过程中断：</strong>目标优化的入基变量 <strong>${headers[pivotCol]}</strong> 在各约束中系数均非正，表明当前问题沿着该基方向是<strong>无界的（Objective value can increase infinitely）</strong>。`
+      );
+      return steps;
     }
 
-    captureStep(tableau, pivotRow, pivotCol);
+    captureStep(
+      tableau,
+      pivotRow,
+      pivotCol,
+      headers,
+      basis,
+      `<strong>第二阶段优化：</strong>选取更优方向，检验数最负的变量 <strong>${headers[pivotCol]}</strong> 进入基，约束限制最强的 <strong>${basis[pivotRow - 1]}</strong> 离开基进行旋转变换。`
+    );
 
-    // 旋转变换
     const pivotVal = tableau[pivotRow][pivotCol];
     tableau[pivotRow] = tableau[pivotRow].map(v => v / pivotVal);
     for (let i = 0; i < tableau.length; i++) {
       if (i !== pivotRow) {
-        const factor = tableau[i][pivotCol];
-        tableau[i] = tableau[i].map((v, idx) => v - factor * tableau[pivotRow][idx]);
+        const coeff = tableau[i][pivotCol];
+        tableau[i] = tableau[i].map((v, idx) => v - coeff * tableau[pivotRow][idx]);
       }
     }
-    
-    // 更新基
+
     basis[pivotRow - 1] = headers[pivotCol];
-    
-    iter++;
+    iter2++;
   }
+
+  // 求解结束
+  const finalSol = getSolution(tableau, headers, basis);
+  captureStep(
+    tableau,
+    null,
+    null,
+    headers,
+    basis,
+    `<strong>求解最优完成：</strong>所有检验数均非负，寻找到唯一最优解！最优坐标极点为 <strong>(${finalSol.x.toFixed(2)}, ${finalSol.y.toFixed(2)})</strong>，最优目标值 Z = <strong>${finalSol.z.toFixed(2)}</strong>。`
+  );
 
   return steps;
 }

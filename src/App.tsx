@@ -177,9 +177,15 @@ export default function App() {
                       <span className="text-[10px] text-slate-400 uppercase font-bold">x₂</span>
                     </div>
                       <div className="flex gap-2 items-center">
-                        <div className="text-xs font-bold text-slate-400 px-2">
-                          ≤
-                        </div>
+                        <select
+                          value={c.operator}
+                          onChange={e => updateConstraint(c.id, { operator: e.target.value as any })}
+                          className="bg-white border border-slate-200 rounded text-xs px-2 py-1 font-bold text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                        >
+                          <option value="<=">&le;</option>
+                          <option value=">=">&ge;</option>
+                          <option value="=">=</option>
+                        </select>
                         <input 
                           type="number" 
                           value={c.b} 
@@ -295,7 +301,9 @@ export default function App() {
             <div className="p-4 bg-indigo-50/50 border-t border-indigo-100/50 shrink-0">
                <div className="text-[11px] text-indigo-900 leading-relaxed">
                   <strong className="block mb-1 text-indigo-700 uppercase font-bold tracking-wider">当前步骤说明:</strong>
-                  {currentStepIdx === 0 ? (
+                  {currentStep?.message ? (
+                    <div dangerouslySetInnerHTML={{ __html: currentStep.message }} />
+                  ) : currentStepIdx === 0 ? (
                     "初始化初始单纯形表。所有松弛变量作为基变量，构成坐标原点 (0,0) 处的初始可行解。"
                   ) : currentStepIdx === steps.length - 1 ? (
                     "所有检验数均非负，说明已找到最优解。当前基变量取值即为最优解，Z 值为最大/最小值。"

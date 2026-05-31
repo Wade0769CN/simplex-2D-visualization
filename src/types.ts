@@ -25,6 +25,7 @@ export interface SimplexStep {
   currentX: number;
   currentY: number;
   objectiveValue: number;
+  message?: string;
 }
 
 export interface Point {
